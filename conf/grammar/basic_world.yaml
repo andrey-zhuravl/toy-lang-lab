@@ -1,0 +1,28 @@
+entities:
+  person:
+    - Ann
+    - Bob
+    - Chen
+    - Dana
+  item:
+    - book
+    - key
+    - coin
+    - map
+  location:
+    - library
+    - market
+    - park
+    - museum
+templates:
+  - "{person} found a {item} at the {location}."
+  - "{person} lost a {item} in the {location}."
+  - "{person} traded a {item} near the {location}."
+weights:
+  templates:
+    - 0.5
+    - 0.3
+    - 0.2
+noise:
+  typo_prob: 0.01
+  drop_prob: 0.02

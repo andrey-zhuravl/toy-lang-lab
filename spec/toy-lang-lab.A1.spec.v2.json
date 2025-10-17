@@ -1,0 +1,330 @@
+{
+  "version": "json.v2",
+  "id": "toy-lang-lab.A1",
+  "title": "Toy-Lang-Lab · Stage A1 · Minimal local skeleton (synthetic data provider)",
+  "owner": {
+    "tech_lead": "Andrei",
+    "reviewers": ["Viktor Volkov", "Kirill Zhuravlev"],
+    "labels": ["lab", "data-gen", "python", "mlops", "reproducibility"]
+  },
+  "goals": [
+    "From a single YAML grammar, deterministically generate a stable dataset (train/valid/test) and metadata.",
+    "Provide a CLI (tlg) with Hydra configs, minimal MLflow logging, and basic integration stubs for GardenKeeper & mlops-homelab.",
+    "Ship a repository skeleton (Python package 'tlg') with tests, quality gates, and a reproducible build (Makefile)."
+  ],
+  "non_goals": [
+    "Training neural models (will be in tiny-transformer-lab).",
+    "Learned tokenizers (A1 uses char/byte-level only).",
+    "Complex world simulators; A1 uses simple templated grammar with probabilities/noise."
+  ],
+  "deliverables": {
+    "artifacts": [
+      "out/<run>/train.jsonl|parquet, valid.jsonl|parquet, test.jsonl|parquet",
+      "out/<run>/manifest.json (config, git_rev, seeds, sha256 hashes)",
+      "MLflow run with logged params + artifacts (manifest + split stats)"
+    ],
+    "cli_commands": [
+      "tlg build-data conf=conf/data/toy_small.yaml out=out/dev",
+      "tlg stats path=out/dev"
+    ]
+  },
+  "repo": {
+    "name": "toy-lang-lab",
+    "package": "tlg",
+    "license": "MIT",
+    "layout": {
+      "pyproject.toml": "Python package + tooling config",
+      "Makefile": "build targets (build-data, fmt, lint, test, smoke, release)",
+      "README.md": "project intro and quickstart",
+      "garden_project.yml": "GardenKeeper manifest (slug, name, relations)",
+      "conf/data/toy_small.yaml": "Hydra config for minimal dataset",
+      "tlg/__init__.py": "version + exports",
+      "tlg/cli.py": "Typer/Click CLI wiring (Hydra-enabled)",
+      "tlg/config.py": "config dataclasses + validation",
+      "tlg/grammar.py": "YAML DSL loader + schema checks",
+      "tlg/generator.py": "sequence and task generators (LM, seq2seq, cls)",
+      "tlg/tokenizers.py": "char/byte-level tokenizer utils",
+      "tlg/writer.py": "split assembly + JSONL/Parquet writers + hashing",
+      "tlg/stats.py": "basic stats (lengths, frequencies) + CLI",
+      "tlg/mlflow_logger.py": "minimal MLflow logging wrapper",
+      "tests/unit/*.py": "unit tests",
+      "tests/integration/*.py": "pipeline & I/O tests",
+      "tests/e2e/test_smoke.py": "end-to-end smoke test",
+      "spec/toy-lang-lab.A1.spec.v2.json": "this spec (MUST be committed)",
+      "adr/0001-grammar-dsl.md": "ADR: DSL structure & validation",
+      "adr/0002-dataset-format.md": "ADR: JSONL vs Parquet contract",
+      "adr/0003-hashing-determinism.md": "ADR: hashing & reproducibility",
+      "adr/0004-mlflow-logging.md": "ADR: what & how we log",
+      "adr/0005-cli-hydra-structure.md": "ADR: CLI + Hydra layout",
+      "ard/A1-architecture-requirements.md": "ARD for A1",
+      ".pre-commit-config.yaml": "hooks: ruff/black/mypy/pytest/commitlint/gitleaks",
+      "ruff.toml": "lint rules",
+      "mypy.ini": "typing rules",
+      "pytest.ini": "pytest config",
+      ".github/workflows/ci.yml": "CI: quality gates"
+    }
+  },
+  "interfaces": {
+    "cli": [
+      {
+        "cmd": "tlg build-data",
+        "args": {
+          "conf": "path to Hydra/YAML config (required)",
+          "out": "output directory (default: out/<timestamp>)",
+          "format": "jsonl|parquet (default from config)",
+          "seed": "override PRNG seed (optional)"
+        },
+        "behavior": "Loads YAML DSL + config, generates splits, writes files, computes hashes, logs MLflow run if MLFLOW_TRACKING_URI present."
+      },
+      {
+        "cmd": "tlg stats",
+        "args": {"path": "path to out/<run>"},
+        "behavior": "Reads splits, prints dataset stats; can log as MLflow artifacts."
+      }
+    ]
+  },
+  "configs": {
+    "hydra_root": "conf",
+    "example": {
+      "file": "conf/data/toy_small.yaml",
+      "schema": {
+        "dataset": {"name": "toy_small", "format": "jsonl", "splits": {"train": 800, "valid": 100, "test": 100}},
+        "seed": 13,
+        "tasks": ["lm", "seq2seq", "cls"],
+        "noise": {"drop_prob": 0.02, "typo_prob": 0.01},
+        "grammar_yaml": "conf/grammar/basic_world.yaml",
+        "tokenizer": {"type": "char", "lowercase": true}
+      }
+    }
+  },
+  "dsl": {
+    "kind": "YAML grammar",
+    "top_keys": ["entities", "templates", "weights", "noise"],
+    "contracts": {
+      "entities": "map name -> list of values",
+      "templates": "list of string templates using {entity} placeholders",
+      "weights": "optional per-template or per-entity weights",
+      "noise": "optional operations: swap, drop, synonym, typo"
+    },
+    "example_path": "conf/grammar/basic_world.yaml",
+    "example_min": "entities:\n  person: [Ann, Bob, Chen]\n  item: [book, key, coin]\ntemplates:\n  - '{person} found a {item}.'\n  - '{person} lost a {item}.'\nweights:\n  templates: [0.6, 0.4]\nnoise:\n  typo_prob: 0.01\n"
+  },
+  "dataset_contracts": {
+    "record_types": {
+      "lm": {"fields": ["id", "task", "text", "meta"], "task": "lm"},
+      "seq2seq": {"fields": ["id", "task", "src", "tgt", "meta"], "task": "seq2seq"},
+      "cls": {"fields": ["id", "task", "text", "label", "meta"], "task": "cls"}
+    },
+    "meta_fields": ["split", "seed", "grammar_rev"],
+    "splits": ["train", "valid", "test"],
+    "formats": ["jsonl", "parquet"],
+    "jsonl_rules": "One JSON object per line; UTF-8; stable key order when hashing.",
+    "parquet_rules": "Arrow schema derived from record_types; partitioned by split.",
+    "stats_fields": ["num_records", "avg_len", "p50_len", "p95_len", "vocab_size_char"]
+  },
+  "hashing_contract": {
+    "config_hash": "sha256 of canonicalized YAML config (sorted keys, stripped comments)",
+    "code_hash": "sha256 of tlg package version + git_rev",
+    "dataset_hash": "sha256 over deterministic traversal of all output records for each split: concatenate newline-joined canonical JSON strings (sorted keys, ensure '\n' between records). For parquet, hash equivalent JSONL view.",
+    "manifest": {
+      "fields": [
+        "dataset_name", "timestamp_utc", "git_rev", "config_path", "config_hash", "code_hash", "splits", "format",
+        "split_hashes", "dataset_hash", "seed", "grammar_file", "row_counts", "stats"
+      ]
+    }
+  },
+  "mlflow_contract": {
+    "when_enabled": "Only if MLFLOW_TRACKING_URI or explicit flag is set.",
+    "params": ["dataset_name", "format", "splits.train", "splits.valid", "splits.test", "seed", "config_hash", "code_hash"],
+    "artifacts": ["manifest.json", "stats.json"],
+    "tags": {"stage": "A1", "component": "tlg-data-gen"}
+  },
+  "clear_metrics": {
+    "description": "SLIs/SLOs for A1",
+    "slis": [
+      {"name": "reproducibility_rate", "unit": "%", "how": "Repeat build 5x with same config; share of runs with identical dataset_hash."},
+      {"name": "gen_throughput", "unit": "records/min", "how": "wall-clock for toy_small (1000 records total)."},
+      {"name": "manifest_completeness", "unit": "%", "how": "share of required manifest fields present."},
+      {"name": "test_pass_rate", "unit": "%", "how": "unit+integration+e2e pass ratio."}
+    ],
+    "slos": {
+      "reproducibility_rate": ">= 100",
+      "gen_throughput": ">= 2000",
+      "manifest_completeness": ">= 100",
+      "test_pass_rate": ">= 100"
+    }
+  },
+  "tests": {
+    "pyramid": {
+      "unit": {
+        "target": ">= 20 tests",
+        "examples": [
+          "YAML grammar loader validates schema and weights",
+          "Tokenizer char/byte deterministic encode/decode",
+          "Noise ops are seed-controlled",
+          "Hash functions: config_hash & dataset_hash are stable on mocks",
+          "JSONL writer preserves key order for hashing"
+        ]
+      },
+      "integration": {
+        "target": ">= 6 tests",
+        "examples": [
+          "build-data end-to-end to JSONL with toy_small",
+          "build-data end-to-end to Parquet and back-compare JSONL view",
+          "stats computation matches manual expectations",
+          "MLflow logging creates run with params + artifacts when enabled"
+        ]
+      },
+      "e2e": {
+        "target": ">= 1 smoke",
+        "smoke": {
+          "steps": [
+            "make build-data CONF=conf/data/toy_small.yaml OUT=out/dev",
+            "assert manifest.json exists and dataset_hash matches golden",
+            "tlg stats path=out/dev returns non-empty summary"
+          ]
+        }
+      }
+    }
+  },
+  "quality_gates": {
+    "pre_commit": ["ruff --fix", "black", "mypy --strict", "pytest -q", "commitlint -E HUSKY_GIT_PARAMS", "gitleaks protect --staged"],
+    "pre_merge": [
+      "CI: lint + type-check + tests (>=80% coverage)",
+      "CI: e2e smoke",
+      "Spec presence: spec/toy-lang-lab.A1.spec.v2.json must exist"
+    ],
+    "pre_release": [
+      "Tag v0.1.0 with changelog",
+      "Re-run smoke and publish build artifacts"
+    ],
+    "coverage_min": 0.8,
+    "typed_code_ratio_min": 0.7
+  },
+  "traceability": {
+    "rules": [
+      "Each task/issue has an ID (e.g., A1-12)",
+      "Commits reference task ID and component (e.g., feat(generator): A1-12 add seq2seq pipeline)",
+      "PR description links tasks + lists tests + metrics touched",
+      "Spec/ADR IDs referenced in code docstrings where relevant"
+    ],
+    "artifacts_map": {
+      "A1-01 repo skeleton": ["pyproject.toml", "Makefile", "README.md"],
+      "A1-02 DSL loader": ["tlg/grammar.py", "tests/unit/test_grammar.py", "adr/0001-grammar-dsl.md"],
+      "A1-03 generator": ["tlg/generator.py", "tests/unit/test_generator.py"],
+      "A1-04 tokenizers": ["tlg/tokenizers.py", "tests/unit/test_tokenizers.py"],
+      "A1-05 writers & hashing": ["tlg/writer.py", "tests/unit/test_hashing.py", "adr/0003-hashing-determinism.md"],
+      "A1-06 CLI+Hydra": ["tlg/cli.py", "conf/data/toy_small.yaml", "adr/0005-cli-hydra-structure.md"],
+      "A1-07 stats": ["tlg/stats.py", "tests/integration/test_stats.py"],
+      "A1-08 MLflow": ["tlg/mlflow_logger.py", "tests/integration/test_mlflow.py", "adr/0004-mlflow-logging.md"],
+      "A1-09 smoke": ["tests/e2e/test_smoke.py"],
+      "A1-10 docs": ["ard/A1-architecture-requirements.md", "spec/toy-lang-lab.A1.spec.v2.json"]
+    }
+  },
+  "conventional_commits": {
+    "types": ["feat", "fix", "chore", "docs", "test", "refactor", "perf", "build", "ci"],
+    "scope_examples": ["grammar", "generator", "tokenizer", "writer", "cli", "stats", "mlflow"],
+    "example": "feat(generator): A1-05 deterministic seq2seq samples (char tokenizer)"
+  },
+  "docs": {
+    "ARD": {
+      "path": "ard/A1-architecture-requirements.md",
+      "outline": ["Context & goals", "Constraints", "Interfaces (CLI/DSL)", "Data contracts", "Risks", "Testing & quality gates"]
+    },
+    "ADRs": [
+      {"id": "0001", "title": "DSL structure & validation", "path": "adr/0001-grammar-dsl.md"},
+      {"id": "0002", "title": "Dataset format (JSONL vs Parquet)", "path": "adr/0002-dataset-format.md"},
+      {"id": "0003", "title": "Hashing & reproducibility", "path": "adr/0003-hashing-determinism.md"},
+      {"id": "0004", "title": "Minimal MLflow logging", "path": "adr/0004-mlflow-logging.md"},
+      {"id": "0005", "title": "CLI + Hydra structure", "path": "adr/0005-cli-hydra-structure.md"}
+    ]
+  },
+  "integration": {
+    "gardenkeeper": {
+      "manifest": "garden_project.yml",
+      "fields": {"slug": "lab/toy-lang-lab", "name": "Toy Lang Lab", "relates": ["lab/tiny-transformer-lab", "infra/mlops-homelab"]}
+    },
+    "mlops_homelab": {
+      "status": "A1 stubs only",
+      "notes": "If MLflow is available from mlops-homelab, runs should appear with tag stage=A1"
+    }
+  },
+  "e2e_smoke": {
+    "command": "make smoke",
+    "expected": {
+      "files": ["out/dev/manifest.json", "out/dev/train.jsonl"],
+      "manifest_keys": ["dataset_name", "dataset_hash", "config_hash", "git_rev", "row_counts"],
+      "exit_code": 0
+    }
+  },
+  "dod": [
+    "`make build-data` creates train/valid/test and manifest.json with reproducibility info (seed, config_hash).",
+    "Re-running with the same config produces identical dataset_hash per split and overall.",
+    "Spec committed under spec/toy-lang-lab.A1.spec.v2.json.",
+    "CI green: lint, typing, unit+integration tests (>=80% coverage), smoke passed.",
+    "ARD + 3+ ADRs merged.",
+    "README includes quickstart and reproducibility note."
+  ],
+  "ci": {
+    "tooling": ["ruff", "black", "mypy", "pytest", "coverage", "commitlint", "gitleaks"],
+    "workflow": {
+      "on": ["push", "pull_request"],
+      "jobs": [
+        {"name": "lint", "steps": ["ruff", "black --check"]},
+        {"name": "typecheck", "steps": ["mypy --strict"]},
+        {"name": "tests", "steps": ["pytest --maxfail=1 --disable-warnings -q", "coverage xml", "coverage report --fail-under=80"]},
+        {"name": "smoke", "steps": ["make smoke"]}
+      ]
+    }
+  },
+  "nfr": {
+    "performance": {"gen_throughput_target_records_per_min": 2000},
+    "stability": {"no_crash_on_10k_records": true},
+    "data_safety": {"no-secrets-in-repo": true, "gitleaks": "enforced"}
+  },
+  "risks": [
+    "Parquet hashing equivalence to JSONL view — mitigate with canonical conversion layer.",
+    "Hydra config drift — mitigate via config_hash in manifest and pin defaults.",
+    "MLflow env not present — feature remains optional in A1."
+  ],
+  "work_items": [
+    {"id": "A1-01", "title": "Repo skeleton + tooling", "priority": 1},
+    {"id": "A1-02", "title": "DSL loader + schema validation", "priority": 1},
+    {"id": "A1-03", "title": "Generators (lm/seq2seq/cls)", "priority": 1},
+    {"id": "A1-04", "title": "Tokenizers (char/byte)", "priority": 1},
+    {"id": "A1-05", "title": "Writers (JSONL/Parquet) + hashing", "priority": 1},
+    {"id": "A1-06", "title": "CLI + Hydra integration", "priority": 1},
+    {"id": "A1-07", "title": "Stats module + CLI", "priority": 2},
+    {"id": "A1-08", "title": "MLflow minimal logging", "priority": 2},
+    {"id": "A1-09", "title": "E2E smoke + golden hash fixtures", "priority": 1},
+    {"id": "A1-10", "title": "ARD + ADRs + README", "priority": 1}
+  ],
+  "make_targets": {
+    "build-data": "python -m tlg.cli build-data conf=${CONF:-conf/data/toy_small.yaml} out=${OUT:-out/dev}",
+    "smoke": "pytest -q tests/e2e/test_smoke.py",
+    "fmt": "ruff --fix && black .",
+    "lint": "ruff . && black --check .",
+    "typecheck": "mypy --strict tlg",
+    "test": "pytest -q",
+    "release": "python -m build && echo tag v0.1.0"
+  },
+  "commit_policy": {
+    "rules": [
+      "One logical change per commit",
+      "Tests in same PR",
+      "Reference task ID",
+      "English commit messages"
+    ],
+    "example": "feat(writer): A1-05 add parquet writer + stable hashing"
+  },
+  "acceptance": {
+    "by": ["Tech Lead", "Reviewer"],
+    "checklist": [
+      "All SLOs met",
+      "Quality gates green",
+      "DoD items verified",
+      "Traceability matrix compiled"
+    ]
+  },
+  "generated_on": "2025-10-17"
+}
