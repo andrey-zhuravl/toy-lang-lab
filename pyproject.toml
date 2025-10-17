@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=65", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "toy-lang-lab"
+version = "0.1.0"
+description = "Toy language lab synthetic data generator"
+authors = [
+    { name = "Toy Lang Lab Team" }
+]
+license = { text = "MIT" }
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "typer[all]>=0.9",
+    "hydra-core>=1.3",
+    "PyYAML>=6.0",
+    "pandas>=2.0",
+    "pyarrow>=14.0",
+    "numpy>=1.26",
+    "mlflow>=2.9",
+]
+
+[project.optional-dependencies]
+dev = [
+    "black>=24.0",
+    "ruff>=0.2",
+    "mypy>=1.8",
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+    "coverage>=7.3",
+]
+
+[project.urls]
+Homepage = "https://example.com/toy-lang-lab"
+
+[project.scripts]
+tlg = "tlg.cli:run"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["tlg*"]
+
+[tool.black]
+line-length = 100
+
+[tool.ruff]
+line-length = 100
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = "-ra"
+testpaths = [
+    "tests"
+]
