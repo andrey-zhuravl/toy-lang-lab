@@ -10,12 +10,12 @@ from typing import Annotated
 
 import typer
 
-from .config import ALLOWED_FORMATS, load_config
-from .generator import generate_dataset
-from .grammar import load_grammar
-from .mlflow_logger import log_run
-from .stats import compute_stats, dataset_stats_from_dir
-from .writer import write_dataset
+from tlg.config import ALLOWED_FORMATS, load_config
+from tlg.generator import generate_dataset
+from tlg.grammar import load_grammar
+from tlg.mlflow_logger import log_run
+from tlg.stats import compute_stats, dataset_stats_from_dir
+from tlg.writer import write_dataset
 
 app = typer.Typer(help="Toy Lang Lab CLI (Stage A1)")
 
@@ -31,10 +31,19 @@ def _parse_override(value: str, key: str) -> str:
     return value
 
 
+# ConfArg = Annotated[str, typer.Argument()]
+#
+# # ИСПРАВЛЕНИЕ: Удалено 'None' из typer.Argument, так как значение по умолчанию
+# # должно устанавливаться только в сигнатуре функции (т.е., ' = None' в build_data)
+# OverridesArg = Annotated[list[str] | None, typer.Argument(help="Hydra-style overrides")]
+#
+# # ИСПРАВЛЕНИЕ: Удален аргумент 'None' из typer.Option. Typer теперь корректно
+# # выведет имя опции '--mlflow' из имени параметра 'mlflow'.
+# MlflowOpt = Annotated[bool | None, typer.Option(help="Force MLflow logging on/off")]
+
 ConfArg = Annotated[str, typer.Argument(..., help="Config path or conf=...")]
 OverridesArg = Annotated[list[str] | None, typer.Argument(None, help="Hydra-style overrides")]
 MlflowOpt = Annotated[bool | None, typer.Option(None, help="Force MLflow logging on/off")]
-
 
 @app.command("build-data")
 def build_data(
@@ -104,6 +113,11 @@ def stats(path: StatsArg) -> None:
     output_dir = Path(_parse_override(path, "path"))
     stats_data = dataset_stats_from_dir(output_dir)
     typer.echo(json.dumps(stats_data, indent=2))
+
+@app.command("hello")
+def hello(name: str = typer.Argument("world", help="Who to greet")) -> None:
+    """Print a friendly greeting."""
+    typer.echo(f"Hello, {name}!")
 
 
 def run() -> None:

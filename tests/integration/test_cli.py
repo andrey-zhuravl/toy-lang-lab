@@ -3,13 +3,15 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from tlg.cli import app
+from tlg.paths import get_config_path
 
 runner = CliRunner()
 
-
 def test_build_data_jsonl(tmp_path: Path) -> None:
     out_dir = tmp_path / "out"
-    result = runner.invoke(app, ["build-data", "conf=conf/data/toy_small.yaml", f"out={out_dir}"])
+    config_path = get_config_path("toy_small.yaml")
+    print(config_path)
+    result = runner.invoke(app, ["build-data", f"conf={config_path}", f"out={out_dir}"])
     assert result.exit_code == 0, result.output
     manifest = (out_dir / "manifest.json").read_text(encoding="utf-8")
     assert "dataset_hash" in manifest
@@ -17,11 +19,12 @@ def test_build_data_jsonl(tmp_path: Path) -> None:
 
 def test_build_data_parquet(tmp_path: Path) -> None:
     out_dir = tmp_path / "parquet"
+    config_path = get_config_path("toy_small.yaml")
     result = runner.invoke(
         app,
         [
             "build-data",
-            "conf=conf/data/toy_small.yaml",
+            f"conf={config_path}",
             f"out={out_dir}",
             "format=parquet",
         ],
@@ -32,7 +35,8 @@ def test_build_data_parquet(tmp_path: Path) -> None:
 
 def test_stats_command(tmp_path: Path) -> None:
     out_dir = tmp_path / "out"
-    runner.invoke(app, ["build-data", "conf=conf/data/toy_small.yaml", f"out={out_dir}"])
+    config_path = get_config_path("toy_small.yaml")
+    runner.invoke(app, ["build-data", f"conf={config_path}", f"out={out_dir}"])
     result = runner.invoke(app, ["stats", f"path={out_dir}"])
     assert result.exit_code == 0
     assert "train" in result.output

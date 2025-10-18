@@ -13,7 +13,7 @@ tasks:
 noise:
   drop_prob: 0.02
   typo_prob: 0.01
-grammar_yaml: conf/grammar/basic_world.yaml
+grammar_yaml: ../grammar/basic_world.yaml
 tokenizer:
   type: char
   lowercase: true

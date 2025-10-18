@@ -1,5 +1,5 @@
-slug: lab/toy-lang-lab
+slug: toy-lang-lab
 name: Toy Lang Lab
 relations:
-  - lab/tiny-transformer-lab
-  - infra/mlops-homelab
+  - tiny-transformer-lab
+  - mlops-homelab
