@@ -85,6 +85,7 @@ def write_dataset(
     grammar_hash: str,
     stats: Mapping[str, Mapping[str, object]],
     output_dir: Path,
+    extra_manifest: Mapping[str, object] | None = None,
 ) -> DatasetWriteResult:
     output_dir.mkdir(parents=True, exist_ok=True)
     split_results: dict[str, SplitWriteResult] = {}
@@ -105,7 +106,15 @@ def write_dataset(
 
     dataset_hash = _sha256("\n".join(total_hash_payload).encode("utf-8"))
 
-    manifest = _build_manifest(config, grammar_hash, split_results, dataset_hash, stats, output_dir)
+    manifest = _build_manifest(
+        config,
+        grammar_hash,
+        split_results,
+        dataset_hash,
+        stats,
+        output_dir,
+        extra_manifest=extra_manifest,
+    )
     manifest_path = output_dir / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
 
@@ -123,6 +132,8 @@ def _build_manifest(
     dataset_hash: str,
     stats: Mapping[str, Mapping[str, object]],
     output_dir: Path,
+    *,
+    extra_manifest: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     config_hash = compute_config_hash(config.to_dict())
     git_rev = _current_git_rev(output_dir)
@@ -131,7 +142,7 @@ def _build_manifest(
     row_counts = {name: result.num_records for name, result in split_results.items()}
     split_hashes = {name: result.hash for name, result in split_results.items()}
 
-    return {
+    manifest: dict[str, object] = {
         "dataset_name": config.dataset.name,
         "timestamp_utc": datetime.now(UTC).isoformat(),
         "git_rev": git_rev,
@@ -148,6 +159,11 @@ def _build_manifest(
         "row_counts": row_counts,
         "stats": stats,
     }
+
+    if extra_manifest:
+        manifest.update(extra_manifest)
+
+    return manifest
 
 
 def _current_git_rev(cwd: Path) -> str:

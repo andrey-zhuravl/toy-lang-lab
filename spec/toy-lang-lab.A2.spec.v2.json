@@ -1,0 +1,521 @@
+{
+  "version": "json.v2",
+  "id": "toy-lang-lab.A2",
+  "title": "Toy-Lang-Lab · Stage A2 · Tokenizers, Dictionaries, Embeddings, Catalog & Performance",
+  "owner": {
+    "tech_lead": "Andrei",
+    "reviewers": [
+      "Viktor Volkov",
+      "Kirill Zhuravlev"
+    ],
+    "labels": [
+      "lab",
+      "data-gen",
+      "python",
+      "mlops",
+      "reproducibility",
+      "tokenizer",
+      "embeddings"
+    ]
+  },
+  "differences_from_A1": [
+    "Learned tokenizers (BPE/WordPiece) training & deterministic application (given fixed seed + tiebreak rules).",
+    "Dictionary generator (controlled lexicons; per-domain vocabulary).",
+    "Optional fixed embeddings (char/word averages or seeded random) with manifest + hashing.",
+    "Dataset contract v1.1: optional tokenization/ids fields + tokenizer/model hashes.",
+    "Parallel generation + streaming writer for throughput.",
+    "Dataset catalog (local YAML) + GardenKeeper linkage; optional MinIO/MLflow artifact push."
+  ],
+  "goals": [
+    "Train and apply a tiny learned tokenizer and produce datasets augmented with tokens/ids as configured.",
+    "Generate dictionaries and (optionally) fixed embeddings with deterministic manifests and hashes.",
+    "Improve performance and reproducibility (parallelism + caching) and register datasets in a local catalog.",
+    "Keep CLI/Hydra/MLflow surfaces consistent with A1; extend minimally."
+  ],
+  "non_goals": [
+    "Training neural networks (remains in tiny-transformer-lab).",
+    "Large-scale distributed generation (A3+).",
+    "Tokenizer research beyond BPE/WordPiece baselines."
+  ],
+  "deliverables": {
+    "artifacts": [
+      "out/<run>/train.jsonl|parquet, valid.*, test.* (may include tokens/ids fields)",
+      "out/<run>/manifest.json (v1.1 with tokenizer/dict/embeddings hashes)",
+      "artifacts/tokenizers/<name>/{vocab.json, merges.txt|sp.model} (+ tokenizer_manifest.json)",
+      "artifacts/dicts/<name>.json (with dict_manifest.json)",
+      "artifacts/embeddings/<name>.parquet (with emb_manifest.json)",
+      "catalog/datasets.yml (local catalog)",
+      "MLflow run(s) with params + artifacts when enabled"
+    ],
+    "cli_commands": [
+      "tlg dict build conf=conf/dict/en_basic.yaml out=artifacts/dicts/…",
+      "tlg tok train conf=conf/tokenizer/bpe_tiny.yaml data=out/dev/train.jsonl out=artifacts/tokenizers/bpe_tiny",
+      "tlg tok apply model=artifacts/tokenizers/bpe_tiny tokenizer=bpe in=out/dev/train.jsonl out=out/dev_tok/train.tok.jsonl",
+      "tlg embed build conf=conf/embeddings/fixed_char.yaml out=artifacts/embeddings/…",
+      "tlg build-data conf=conf/data/toy_medium.yaml out=out/dev format=jsonl",
+      "tlg validate path=out/dev",
+      "tlg catalog add path=out/dev"
+    ]
+  },
+  "repo": {
+    "name": "toy-lang-lab",
+    "package": "tlg",
+    "spec_path": "spec/toy-lang-lab.A2.spec.v2.json",
+    "requires": [
+      "A1 complete and green CI"
+    ],
+    "layout_additions": {
+      "tlg/tokenizers_learned.py": "BPE/WordPiece training and apply",
+      "tlg/dictionaries.py": "controlled lexicon builder",
+      "tlg/embeddings.py": "fixed embeddings generator",
+      "tlg/catalog.py": "local datasets.yml catalog ops",
+      "tlg/validate.py": "dataset contract checks + determinism check",
+      "conf/tokenizer/bpe_tiny.yaml": "example tokenizer training config",
+      "conf/embeddings/fixed_char.yaml": "example embeddings config",
+      "conf/data/toy_medium.yaml": "dataset config referencing learned tokenizer",
+      "tests/unit/test_bpe_train.py": "unit tests for tokenizer training",
+      "tests/unit/test_tok_apply.py": "unit tests for apply determinism",
+      "tests/unit/test_dicts.py": "unit tests for dictionary generator",
+      "tests/unit/test_embeddings.py": "unit tests for embeddings generator",
+      "tests/integration/test_build_with_tok.py": "integration: build + apply",
+      "tests/integration/test_catalog_validate.py": "integration: catalog + validate",
+      "tests/e2e/test_smoke_a2.py": "e2e smoke: train tiny BPE, build dataset using it"
+    }
+  },
+  "interfaces": {
+    "cli": [
+      {
+        "cmd": "tlg tok train",
+        "args": {
+          "conf": "path to tokenizer config (required)",
+          "data": "training corpus path JSONL (text field) or dir",
+          "out": "output dir for tokenizer artifacts",
+          "seed": "PRNG seed",
+          "algorithm": "bpe|wordpiece"
+        },
+        "outputs": [
+          "vocab.json",
+          "merges.txt|sp.model",
+          "tokenizer_manifest.json"
+        ]
+      },
+      {
+        "cmd": "tlg tok apply",
+        "args": {
+          "model": "path to tokenizer model",
+          "in": "input jsonl",
+          "out": "output jsonl|parquet",
+          "field": "text|src|tgt",
+          "ids": true
+        },
+        "behavior": "Appends tokens and/or ids fields; preserves original schema."
+      },
+      {
+        "cmd": "tlg dict build",
+        "args": {
+          "conf": "dict YAML",
+          "out": "output path",
+          "seed": "optional"
+        },
+        "behavior": "Builds JSON dictionary with version + hash"
+      },
+      {
+        "cmd": "tlg embed build",
+        "args": {
+          "conf": "embeddings YAML",
+          "out": "dir"
+        },
+        "behavior": "Produces deterministic fixed embeddings parquet + manifest"
+      },
+      {
+        "cmd": "tlg validate",
+        "args": {
+          "path": "out/<run>"
+        },
+        "behavior": "Schema + hash consistency checks"
+      },
+      {
+        "cmd": "tlg catalog add",
+        "args": {
+          "path": "out/<run>"
+        },
+        "behavior": "Append/merge into catalog/datasets.yml"
+      }
+    ]
+  },
+  "configs": {
+    "examples": [
+      {
+        "file": "conf/tokenizer/bpe_tiny.yaml"
+      },
+      {
+        "file": "conf/embeddings/fixed_char.yaml"
+      },
+      {
+        "file": "conf/data/toy_medium.yaml"
+      }
+    ]
+  },
+  "dataset_contracts": {
+    "version": "1.1",
+    "augmentations": {
+      "tokenized_fields": [
+        "tokens",
+        "ids"
+      ],
+      "meta_additions": [
+        "tokenizer_name",
+        "tokenizer_hash",
+        "dict_hash",
+        "embeddings_name",
+        "embeddings_hash"
+      ]
+    },
+    "hashing_updates": {
+      "tokenizer_hash": "sha256 over tokenizer model files (ordered)",
+      "dict_hash": "sha256 of normalized dictionary JSON",
+      "embeddings_hash": "sha256 over embeddings parquet bytes",
+      "dataset_hash_note": "Hash includes any additional fields (tokens/ids) when present"
+    }
+  },
+  "mlflow_contract": {
+    "params": [
+      "tokenizer_name",
+      "tokenizer_hash",
+      "dict_hash",
+      "embeddings_hash",
+      "parallel_workers",
+      "streaming_writer"
+    ],
+    "artifacts": [
+      "manifest.json",
+      "stats.json",
+      "tokenizer_manifest.json (if trained)",
+      "catalog_snapshot.yml"
+    ],
+    "tags": {
+      "stage": "A2",
+      "component": "tlg-data-gen"
+    }
+  },
+  "clear_metrics": {
+    "description": "SLIs/SLOs for A2 (extend A1)",
+    "slis": [
+      {
+        "name": "tokenizer_train_determinism",
+        "unit": "%",
+        "how": "Train 3x with same seed; identical merges/vocab -> success rate"
+      },
+      {
+        "name": "oov_rate",
+        "unit": "%",
+        "how": "On validation split for learned tokenizer"
+      },
+      {
+        "name": "tok_apply_throughput",
+        "unit": "records/min",
+        "how": "apply on toy_medium train split"
+      },
+      {
+        "name": "gen_throughput_parallel",
+        "unit": "records/min",
+        "how": "parallel build-data vs A1 baseline"
+      },
+      {
+        "name": "catalog_write_success",
+        "unit": "%",
+        "how": "catalog add without conflicts"
+      }
+    ],
+    "slos": {
+      "tokenizer_train_determinism": 100,
+      "oov_rate": 1.0,
+      "tok_apply_throughput": 3000,
+      "gen_throughput_parallel": 4000,
+      "catalog_write_success": 100
+    }
+  },
+  "tests": {
+    "pyramid": {
+      "unit": {
+        "target": ">= 28 tests",
+        "examples": [
+          "BPE trainer tie-break rules yield stable merges",
+          "Tokenizer apply is pure/deterministic",
+          "Dictionary builder respects seed and schema",
+          "Embeddings generator returns fixed vectors for same seed",
+          "Validator catches schema/hash mismatches"
+        ]
+      },
+      "integration": {
+        "target": ">= 8 tests",
+        "examples": [
+          "Train tiny BPE on toy_small, apply to dataset",
+          "Build embeddings and reference in manifest",
+          "Catalog add merges entries idempotently",
+          "MinIO/MLflow optional push guarded by flags"
+        ]
+      },
+      "e2e": {
+        "target": ">= 1 smoke",
+        "smoke": {
+          "steps": [
+            "tlg tok train conf=conf/tokenizer/bpe_tiny.yaml data=fixtures/corpus_toy.jsonl out=artifacts/tokenizers/bpe_tiny",
+            "tlg build-data conf=conf/data/toy_medium.yaml out=out/a2",
+            "tlg tok apply model=artifacts/tokenizers/bpe_tiny in=out/a2/train.jsonl out=out/a2_tok/train.tok.jsonl field=text ids=true",
+            "tlg validate path=out/a2",
+            "assert manifest.json contains tokenizer_hash and dataset_hash"
+          ]
+        }
+      }
+    }
+  },
+  "quality_gates": {
+    "pre_commit": [
+      "ruff --fix",
+      "black",
+      "mypy --strict",
+      "pytest -q",
+      "commitlint -E HUSKY_GIT_PARAMS",
+      "gitleaks protect --staged"
+    ],
+    "pre_merge": [
+      "CI: lint + type-check + tests (>=85% coverage)",
+      "CI: e2e smoke A2",
+      "Spec presence: spec/toy-lang-lab.A2.spec.v2.json must exist"
+    ],
+    "pre_release": [
+      "Tag v0.2.0",
+      "Publish artifacts/tokenizers/* and catalog snapshot (if enabled)"
+    ],
+    "coverage_min": 0.85,
+    "typed_code_ratio_min": 0.75
+  },
+  "traceability": {
+    "rules": [
+      "Every commit references A2 task ID",
+      "PR template lists: problems, solution, tests, risks, screenshots/logs",
+      "Link ADRs/ARD in PR"
+    ],
+    "artifacts_map": {
+      "A2-01 tokenizers_learned": [
+        "tlg/tokenizers_learned.py",
+        "tests/unit/test_bpe_train.py",
+        "adr/0006-tokenizer-learning.md"
+      ],
+      "A2-02 dictionaries": [
+        "tlg/dictionaries.py",
+        "tests/unit/test_dicts.py",
+        "adr/0007-dataset-catalog-registry.md"
+      ],
+      "A2-03 embeddings": [
+        "tlg/embeddings.py",
+        "tests/unit/test_embeddings.py",
+        "adr/0008-embedding-generation.md"
+      ],
+      "A2-04 validate+catalog": [
+        "tlg/validate.py",
+        "tlg/catalog.py",
+        "tests/integration/test_catalog_validate.py",
+        "adr/0010-caching-hash-v2.md"
+      ],
+      "A2-05 e2e": [
+        "tests/e2e/test_smoke_a2.py"
+      ]
+    }
+  },
+  "conventional_commits": {
+    "types": [
+      "feat",
+      "fix",
+      "chore",
+      "docs",
+      "test",
+      "refactor",
+      "perf",
+      "build",
+      "ci"
+    ],
+    "scope_examples": [
+      "tokenizer",
+      "dict",
+      "embeddings",
+      "catalog",
+      "validate",
+      "cli"
+    ],
+    "example": "feat(tokenizer): A2-01 train tiny BPE with deterministic ties"
+  },
+  "docs": {
+    "ARD": {
+      "path": "ard/A2-architecture-requirements.md",
+      "outline": [
+        "Context & deltas vs A1",
+        "Tokenizer module",
+        "Dictionary/Embeddings modules",
+        "Catalog/Validate",
+        "Perf & parallelism",
+        "Risks"
+      ]
+    },
+    "ADRs": [
+      {
+        "id": "0006",
+        "title": "Tokenizer learning & tie-break determinism",
+        "path": "adr/0006-tokenizer-learning.md"
+      },
+      {
+        "id": "0007",
+        "title": "Dataset catalog contract",
+        "path": "adr/0007-dataset-catalog-registry.md"
+      },
+      {
+        "id": "0008",
+        "title": "Fixed embeddings generator",
+        "path": "adr/0008-embedding-generation.md"
+      },
+      {
+        "id": "0009",
+        "title": "Parallel generation & streaming writer",
+        "path": "adr/0009-parallel-streaming.md"
+      },
+      {
+        "id": "0010",
+        "title": "Caching & hashing contract v1.1",
+        "path": "adr/0010-caching-hash-v2.md"
+      }
+    ]
+  },
+  "integration": {
+    "gardenkeeper": {
+      "manifest": "garden_project.yml",
+      "fields": {
+        "slug": "toy-lang-lab",
+        "relates": [
+          "tiny-transformer-lab",
+          "mlops-homelab"
+        ]
+      },
+      "catalog_export": "catalog/datasets.yml includes slug + dataset entries"
+    },
+    "mlops_homelab": {
+      "optional": true,
+      "notes": "If MLflow/MinIO available, push artifacts under experiment 'toy-lang-lab-A2'"
+    }
+  },
+  "nfr": {
+    "performance": {
+      "target_gen_rpm_parallel": 4000,
+      "tok_apply_rpm": 3000
+    },
+    "stability": {
+      "no_crash_on_50k_records": true
+    },
+    "data_safety": {
+      "no_secrets": true,
+      "gitleaks": "enforced"
+    }
+  },
+  "e2e_smoke": {
+    "command": "pytest -q tests/e2e/test_smoke_a2.py",
+    "expected": {
+      "exit_code": 0,
+      "manifest_keys": [
+        "dataset_hash",
+        "tokenizer_hash",
+        "config_hash"
+      ]
+    }
+  },
+  "dod": [
+    "`tlg tok train` produces deterministic model files given seed and tie-break rules.",
+    "`tlg tok apply` augments dataset with tokens/ids and preserves reproducibility.",
+    "`tlg dict build` and `tlg embed build` produce manifests + hashes.",
+    "`tlg validate` passes on example outputs; catalog updated idempotently.",
+    "CI green: coverage >=85%, smoke A2 green; spec committed under spec/toy-lang-lab.A2.spec.v2.json."
+  ],
+  "ci": {
+    "tooling": [
+      "ruff",
+      "black",
+      "mypy",
+      "pytest",
+      "coverage",
+      "commitlint",
+      "gitleaks"
+    ],
+    "workflow": {
+      "on": [
+        "push",
+        "pull_request"
+      ],
+      "jobs": [
+        "lint",
+        "typecheck",
+        "tests",
+        "smoke"
+      ]
+    }
+  },
+  "work_items": [
+    {
+      "id": "A2-01",
+      "title": "Tokenizer training (BPE/WordPiece)",
+      "priority": 1
+    },
+    {
+      "id": "A2-02",
+      "title": "Tokenizer apply pipeline",
+      "priority": 1
+    },
+    {
+      "id": "A2-03",
+      "title": "Dictionary generator",
+      "priority": 2
+    },
+    {
+      "id": "A2-04",
+      "title": "Fixed embeddings generator",
+      "priority": 2
+    },
+    {
+      "id": "A2-05",
+      "title": "Validate & catalog",
+      "priority": 1
+    },
+    {
+      "id": "A2-06",
+      "title": "Parallel generation + streaming writer",
+      "priority": 1
+    },
+    {
+      "id": "A2-07",
+      "title": "Tests & smoke A2",
+      "priority": 1
+    },
+    {
+      "id": "A2-08",
+      "title": "Docs: ARD + ADRs",
+      "priority": 1
+    }
+  ],
+  "make_targets": {
+    "tok-train": "python -m tlg.cli tok train conf=${CONF:-conf/tokenizer/bpe_tiny.yaml} data=${DATA:-out/dev/train.jsonl} out=${OUT:-artifacts/tokenizers/bpe_tiny}",
+    "tok-apply": "python -m tlg.cli tok apply model=${MODEL:-artifacts/tokenizers/bpe_tiny} in=${IN:-out/dev/train.jsonl} out=${OUT:-out/dev_tok/train.tok.jsonl}",
+    "validate": "python -m tlg.cli validate path=${PATH:-out/dev}",
+    "catalog-add": "python -m tlg.cli catalog add path=${PATH:-out/dev}"
+  },
+  "acceptance": {
+    "by": [
+      "Tech Lead",
+      "Reviewer"
+    ],
+    "checklist": [
+      "SLOs met",
+      "Quality gates green",
+      "DoD verified",
+      "Traceability matrix updated"
+    ]
+  },
+  "generated_on": "2025-10-17"
+}

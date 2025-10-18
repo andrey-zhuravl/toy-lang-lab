@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, MutableMapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
@@ -12,7 +12,7 @@ import yaml
 
 ALLOWED_TASKS: list[str] = ["lm", "seq2seq", "cls"]
 ALLOWED_FORMATS: list[str] = ["jsonl", "parquet"]
-TOKENIZER_TYPES: list[str] = ["char", "byte"]
+TOKENIZER_TYPES: list[str] = ["char", "byte", "learned"]
 
 
 @dataclass(frozen=True)
@@ -38,10 +38,22 @@ class DatasetConfig:
 
 @dataclass(frozen=True)
 class TokenizerConfig:
-    """Tokenizer settings."""
+    """Tokenizer settings for dataset augmentation."""
 
-    type: Literal["char", "byte"]
+    type: Literal["char", "byte", "learned"]
     lowercase: bool = False
+    model_path: Path | None = None
+    apply_to: tuple[str, ...] = ()
+    add_ids: bool = False
+    name: str | None = None
+
+
+@dataclass(frozen=True)
+class PerformanceConfig:
+    """Performance related toggles."""
+
+    parallel_workers: int = 1
+    streaming_writer: bool = False
 
 
 @dataclass(frozen=True)
@@ -66,6 +78,7 @@ class TlgConfig:
     noise: NoiseConfig
     config_path: Path
     raw_dict: Mapping[str, object]
+    performance: PerformanceConfig = field(default_factory=PerformanceConfig)
 
     def to_dict(self) -> dict[str, object]:
         return canonicalize(self.raw_dict)
@@ -145,8 +158,44 @@ def load_config(path: Path) -> TlgConfig:
     tokenizer_type = tokenizer_section.get("type", "char")
     if tokenizer_type not in TOKENIZER_TYPES:
         raise ConfigError(f"Unsupported tokenizer.type '{tokenizer_type}'")
+
     lowercase = bool(tokenizer_section.get("lowercase", False))
-    tokenizer = TokenizerConfig(type=tokenizer_type, lowercase=lowercase)  # type: ignore[arg-type]
+    model_path: Path | None = None
+    apply_to: tuple[str, ...] = ()
+    add_ids = bool(tokenizer_section.get("add_ids", False))
+    tokenizer_name = tokenizer_section.get("name")
+    if tokenizer_name is not None and not isinstance(tokenizer_name, str):
+        raise ConfigError("tokenizer.name must be a string if provided")
+
+    if tokenizer_type == "learned":
+        model_path_value = tokenizer_section.get("model_path")
+        if not isinstance(model_path_value, str) or not model_path_value:
+            raise ConfigError("learned tokenizer requires 'model_path'")
+        model_path = (path.parent / model_path_value).resolve()
+
+        apply_value = tokenizer_section.get("apply_to", [])
+        if isinstance(apply_value, str):
+            apply_to_values = [apply_value]
+        elif isinstance(apply_value, list):
+            apply_to_values = []
+            for item in apply_value:
+                if not isinstance(item, str) or not item:
+                    raise ConfigError("tokenizer.apply_to entries must be strings")
+                apply_to_values.append(item)
+        else:
+            raise ConfigError("tokenizer.apply_to must be a string or list of strings")
+        if not apply_to_values:
+            raise ConfigError("tokenizer.apply_to must not be empty for learned tokenizers")
+        apply_to = tuple(apply_to_values)
+
+    tokenizer = TokenizerConfig(
+        type=tokenizer_type,  # type: ignore[arg-type]
+        lowercase=lowercase,
+        model_path=model_path,
+        apply_to=apply_to,
+        add_ids=add_ids,
+        name=tokenizer_name,
+    )
 
     noise_section = raw.get("noise", {})
     if not isinstance(noise_section, MutableMapping):
@@ -158,6 +207,19 @@ def load_config(path: Path) -> TlgConfig:
         synonym_prob=_ensure_probability(
             noise_section.get("synonym_prob", 0.0), "noise.synonym_prob"
         ),
+    )
+
+    performance_section = raw.get("performance", {})
+    if not isinstance(performance_section, MutableMapping):
+        raise ConfigError("'performance' must be a mapping when provided")
+
+    parallel_workers = performance_section.get("parallel_workers", 1)
+    if not isinstance(parallel_workers, int) or parallel_workers <= 0:
+        raise ConfigError("performance.parallel_workers must be a positive integer")
+    streaming_writer = bool(performance_section.get("streaming_writer", False))
+    performance = PerformanceConfig(
+        parallel_workers=parallel_workers,
+        streaming_writer=streaming_writer,
     )
 
     grammar_path = raw.get("grammar_yaml")
@@ -175,6 +237,7 @@ def load_config(path: Path) -> TlgConfig:
         noise=noise,
         config_path=path,
         raw_dict=canonicalize(raw),
+        performance=performance,
     )
 
 
