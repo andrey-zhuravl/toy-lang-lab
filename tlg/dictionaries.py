@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import json
 import random
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+from tlg.grammar import Grammar
 
 
 class DictionaryError(RuntimeError):
@@ -140,4 +143,73 @@ def _hash_payload(payload: list[dict[str, object]]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-__all__ = ["DictionaryConfig", "DictionaryError", "build_dictionary", "load_dictionary_config"]
+def generate_dictionary_from_grammar(
+    grammar: Grammar,
+    out_path: Path,
+    add_specials: list[str] | None = None,
+) -> dict[str, object]:
+    """Generate a dictionary file from a grammar definition."""
+
+    specials = add_specials or []
+    tokens: list[str] = []
+    seen: set[str] = set()
+
+    def _add(token: str) -> None:
+        normalized = token.strip()
+        if not normalized:
+            return
+        if normalized not in seen:
+            seen.add(normalized)
+            tokens.append(normalized)
+
+    for token in specials:
+        _add(token)
+
+    for values in grammar.entities.values():
+        for value in values:
+            _add(value)
+
+    pattern = re.compile(r"[A-Za-z0-9_<>{}/-]+")
+    for template in grammar.templates:
+        for candidate in pattern.findall(template):
+            if candidate.startswith("{") and candidate.endswith("}"):
+                continue
+            _add(candidate)
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text("\n".join(tokens) + "\n", encoding="utf-8")
+
+    token2id = {token: idx for idx, token in enumerate(tokens)}
+    id2token_path = out_path.with_suffix(".id2token.tsv")
+    with id2token_path.open("w", encoding="utf-8") as handle:
+        for token, idx in token2id.items():
+            handle.write(f"{idx}\t{token}\n")
+    token2id_path = out_path.with_suffix(".token2id.json")
+    token2id_path.write_text(json.dumps(token2id, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    specials_path = out_path.with_suffix(".special_tokens.json")
+    specials_path.write_text(
+        json.dumps(tokens[: len(specials)], indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    manifest = {
+        "vocab_path": str(out_path),
+        "token2id_path": str(token2id_path),
+        "id2token_path": str(id2token_path),
+        "tokens": len(tokens),
+        "special_tokens": tokens[: len(specials)],
+    }
+    manifest_path = out_path.with_suffix(".manifest.json")
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    manifest["manifest_path"] = str(manifest_path)
+    return manifest
+
+
+__all__ = [
+    "DictionaryConfig",
+    "DictionaryError",
+    "build_dictionary",
+    "generate_dictionary_from_grammar",
+    "load_dictionary_config",
+]

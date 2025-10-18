@@ -1,0 +1,497 @@
+{
+  "version": "json.v2",
+  "module": "toy-lang-lab",
+  "layer": "B1",
+  "title": "Tokenizers (BPE/Unigram) & Dictionaries",
+  "id": "tlg-B1-tokenizer",
+  "status": "spec",
+  "created_at": "2025-10-17 10:55:27",
+  "owners": [
+    {
+      "role": "PO",
+      "name": "Andrei"
+    },
+    {
+      "role": "Spec",
+      "name": "GPT-5 Thinking"
+    }
+  ],
+  "links": {
+    "depends_on": [
+      "tlg-A1-core",
+      "tlg-A2-datasets"
+    ],
+    "repo_slug": "lab/toy-lang-lab",
+    "mlflow_experiment": "toy-lang-lab/tokenizer",
+    "issue_tracker": [
+      "B1-1",
+      "B1-2"
+    ]
+  },
+  "objectives": [
+    "Train a controllable tokenizer (BPE or Unigram) on a chosen corpus.",
+    "Encode dataset splits to .npz and/or .arrow using the trained tokenizer.",
+    "Optionally generate a rule-based (hard) dictionary driven by grammar rules for DSL-like tokens.",
+    "Log artifacts and metrics to MLflow; provide paths for tiny-transformer-lab to consume."
+  ],
+  "scope": {
+    "in": [
+      "CLI `tlg train-tokenizer` supporting kind={bpe,unigram}, vocab_size, input(s), special tokens, normalization, pre-tokenization, seed.",
+      "CLI `tlg encode` to encode splits into .npz/.arrow + id↔token dictionary.",
+      "CLI `tlg gen-dict` to build a hard dictionary from grammar rules (YAML).",
+      "Metrics computation and report (OOV/UNK rate, avg tokens/sequence, coverage, throughput).",
+      "MLflow logging of tokenizer artifacts, metrics, params, and tags."
+    ],
+    "out": [
+      "Model training of LMs (handled in later layers).",
+      "Advanced language-specific morphological analyzers (beyond simple rules)."
+    ]
+  },
+  "deliverables": {
+    "artifacts": [
+      "tokenizer.model|tokenizer.json",
+      "vocab.txt (+ merges.txt for BPE or spm files for Unigram)",
+      "id2token.tsv, token2id.json, special_tokens.json",
+      "encoded_{split}.{npz|arrow}",
+      "segmentation_report.json",
+      "tokenizer_run_manifest.json"
+    ],
+    "reports": [
+      "MLflow run with params, metrics, tags and artifacts attached",
+      "Console summary table after each command"
+    ]
+  },
+  "cli": {
+    "commands": [
+      {
+        "name": "train-tokenizer",
+        "example": "tlg train-tokenizer kind=bpe vocab_size=8000 input=out/train.jsonl text_key=text",
+        "args": [
+          {
+            "name": "kind",
+            "type": "str",
+            "enum": [
+              "bpe",
+              "unigram"
+            ],
+            "required": true,
+            "desc": "Algorithm to use."
+          },
+          {
+            "name": "vocab_size",
+            "type": "int",
+            "required": true,
+            "desc": "Target vocabulary size."
+          },
+          {
+            "name": "input",
+            "type": "path|glob|list",
+            "required": true,
+            "desc": "Path(s) to JSONL/CSV/TXT corpus."
+          },
+          {
+            "name": "text_key",
+            "type": "str",
+            "default": "text",
+            "desc": "Field name if JSONL/CSV."
+          },
+          {
+            "name": "normalization",
+            "type": "str",
+            "default": "nfc",
+            "enum": [
+              "nfc",
+              "nfkc",
+              "none"
+            ],
+            "desc": "Unicode normalization."
+          },
+          {
+            "name": "pretokenizer",
+            "type": "str",
+            "default": "whitespace",
+            "enum": [
+              "whitespace",
+              "bytelevel",
+              "basic"
+            ],
+            "desc": "Pre-tokenization strategy."
+          },
+          {
+            "name": "min_frequency",
+            "type": "int",
+            "default": 2,
+            "desc": "Minimum token frequency."
+          },
+          {
+            "name": "character_coverage",
+            "type": "float",
+            "default": 0.9995,
+            "desc": "For SentencePiece Unigram."
+          },
+          {
+            "name": "limit_alphabet",
+            "type": "int",
+            "default": 1000,
+            "desc": "Limit alphabet size (BPE)."
+          },
+          {
+            "name": "special_tokens",
+            "type": "list",
+            "default": [
+              "<pad>",
+              "<bos>",
+              "<eos>",
+              "<unk>",
+              "<mask>"
+            ],
+            "desc": "Reserved tokens."
+          },
+          {
+            "name": "seed",
+            "type": "int",
+            "default": 42,
+            "desc": "Random seed for reproducibility."
+          },
+          {
+            "name": "out_dir",
+            "type": "path",
+            "default": "artifacts/tokenizers",
+            "desc": "Where to save artifacts."
+          },
+          {
+            "name": "mlflow",
+            "type": "bool",
+            "default": true,
+            "desc": "Log run to MLflow."
+          },
+          {
+            "name": "run_name",
+            "type": "str",
+            "default": "tokenizer-B1",
+            "desc": "MLflow run name."
+          }
+        ],
+        "outputs": [
+          "tokenizer.{json|model}",
+          "vocab.txt (+ merges.txt)",
+          "segmentation_report.json",
+          "tokenizer_run_manifest.json",
+          "MLflow run ID (if --mlflow)"
+        ],
+        "exit_codes": {
+          "0": "success",
+          "2": "invalid args",
+          "3": "training failed"
+        }
+      },
+      {
+        "name": "encode",
+        "example": "tlg encode tokenizer=artifacts/tokenizers/tokenizer.json input=data/splits/train.jsonl out=encoded/train.arrow format=arrow max_length=256 pad_to_max_length=true",
+        "args": [
+          {
+            "name": "tokenizer",
+            "type": "path",
+            "required": true,
+            "desc": "Path to tokenizer.json|model."
+          },
+          {
+            "name": "input",
+            "type": "path|glob|list",
+            "required": true,
+            "desc": "Split file(s)."
+          },
+          {
+            "name": "text_key",
+            "type": "str",
+            "default": "text",
+            "desc": "Field name in JSONL/CSV."
+          },
+          {
+            "name": "format",
+            "type": "str",
+            "enum": [
+              "npz",
+              "arrow"
+            ],
+            "default": "arrow",
+            "desc": "Output format."
+          },
+          {
+            "name": "out",
+            "type": "path",
+            "required": true,
+            "desc": "Output path."
+          },
+          {
+            "name": "max_length",
+            "type": "int",
+            "default": 256,
+            "desc": "Truncation length."
+          },
+          {
+            "name": "pad_to_max_length",
+            "type": "bool",
+            "default": true,
+            "desc": "Pad sequences to max_length."
+          },
+          {
+            "name": "prepend_bos",
+            "type": "bool",
+            "default": true,
+            "desc": "Add <bos> at start."
+          },
+          {
+            "name": "append_eos",
+            "type": "bool",
+            "default": true,
+            "desc": "Add <eos> at end."
+          },
+          {
+            "name": "write_maps",
+            "type": "bool",
+            "default": true,
+            "desc": "Export id2token/token2id maps."
+          },
+          {
+            "name": "mlflow",
+            "type": "bool",
+            "default": true,
+            "desc": "Log encoded stats to MLflow."
+          }
+        ],
+        "outputs": [
+          "encoded_{split}.{npz|arrow}",
+          "id2token.tsv, token2id.json, special_tokens.json (if write_maps)",
+          "encode_report.json"
+        ],
+        "exit_codes": {
+          "0": "success",
+          "4": "tokenizer load failed",
+          "5": "encoding failed"
+        }
+      },
+      {
+        "name": "gen-dict",
+        "example": "tlg gen-dict grammar=spec/dsl-grammar.yml out=artifacts/dictionaries/dsl.vocab.txt",
+        "args": [
+          {
+            "name": "grammar",
+            "type": "path",
+            "required": true,
+            "desc": "YAML grammar with token rules."
+          },
+          {
+            "name": "out",
+            "type": "path",
+            "required": true,
+            "desc": "Output vocab file."
+          },
+          {
+            "name": "add_specials",
+            "type": "list",
+            "default": [
+              "<pad>",
+              "<bos>",
+              "<eos>",
+              "<unk>"
+            ],
+            "desc": "Extra tokens to prefix."
+          }
+        ],
+        "outputs": [
+          "dsl.vocab.txt",
+          "dsl.token2id.json / dsl.id2token.tsv"
+        ],
+        "exit_codes": {
+          "0": "success",
+          "6": "grammar invalid"
+        }
+      }
+    ]
+  },
+  "config_schema": {
+    "kind": "bpe|unigram",
+    "tokenizers_library": "sentencepiece|huggingface_tokenizers",
+    "params": {
+      "vocab_size": "int",
+      "min_frequency": "int",
+      "character_coverage": "float (unigram)",
+      "limit_alphabet": "int (bpe)",
+      "normalization": "nfc|nfkc|none",
+      "pretokenizer": "whitespace|bytelevel|basic",
+      "special_tokens": "list[str]",
+      "seed": "int"
+    }
+  },
+  "data_contract": {
+    "inputs": {
+      "train_corpus": "JSONL/CSV/TXT; default jsonl key: text",
+      "splits": [
+        "train",
+        "val",
+        "test"
+      ]
+    },
+    "outputs": {
+      "arrow": {
+        "schema": {
+          "input_ids": "list<int32>",
+          "attention_mask": "list<int8>",
+          "length": "int32",
+          "text": "string (optional)"
+        }
+      },
+      "npz": {
+        "arrays": {
+          "input_ids": "[N, L] int32 (padded)",
+          "attention_mask": "[N, L] int8",
+          "lengths": "[N] int32"
+        }
+      },
+      "maps": [
+        "id2token.tsv",
+        "token2id.json",
+        "special_tokens.json"
+      ]
+    },
+    "naming": {
+      "tokenizer_files": "tokenizer-{algo}-v{vocab_size}-{dataset_id}-{ts}.{json|model}",
+      "vocab": "vocab.txt",
+      "bpe_merges": "merges.txt",
+      "report": "segmentation_report.json"
+    }
+  },
+  "mlops": {
+    "mlflow": {
+      "experiment": "toy-lang-lab/tokenizer",
+      "artifact_path": "tokenizers/{run_id}",
+      "params": [
+        "kind",
+        "vocab_size",
+        "min_frequency",
+        "character_coverage",
+        "limit_alphabet",
+        "normalization",
+        "pretokenizer",
+        "special_tokens",
+        "seed",
+        "dataset_id",
+        "dataset_hash",
+        "commit_sha"
+      ],
+      "metrics": [
+        "oov_rate",
+        "unk_rate",
+        "tokens_per_word_mean",
+        "tokens_per_seq_mean",
+        "tokens_per_seq_p95",
+        "chars_coverage",
+        "train_time_sec",
+        "train_throughput_lines_per_sec",
+        "encode_time_sec",
+        "encode_throughput_samples_per_sec"
+      ],
+      "tags": [
+        "layer:B1",
+        "module:toy-lang-lab"
+      ]
+    },
+    "lineage": {
+      "dataset_hash": "sha256 of input files (sorted)",
+      "commit_sha": "git rev-parse HEAD",
+      "env": [
+        "python_version",
+        "tokenizers_version",
+        "sentencepiece_version",
+        "os",
+        "cpu_count"
+      ]
+    }
+  },
+  "metrics": {
+    "sli": {
+      "oov_rate": "UNK token share on eval sample",
+      "tokens_per_seq_mean": "Average tokens per sequence @max_length",
+      "train_throughput": "lines/sec during training",
+      "encode_throughput": "samples/sec during encoding"
+    },
+    "slo": {
+      "oov_rate": "<= 0.5%",
+      "tokens_per_seq_mean": "<= 64 @ max_length=256 (dataset-dependent)",
+      "train_throughput": ">= 50k lines/min on 8-core CPU (sample)",
+      "encode_throughput": ">= 10k samples/min on 8-core CPU (sample)"
+    }
+  },
+  "tests": {
+    "unit": [
+      "Config parsing and validation",
+      "Special tokens handling and deduplication",
+      "Mapping export/import roundtrip"
+    ],
+    "integration": [
+      "Deterministic training with fixed seed (hash of tokenizer.json stable)",
+      "Encode small corpus to arrow and npz, schemas validate",
+      "Encode-decode roundtrip: detokenize(tokenize(text)) has reasonable equality (whitespace-normalized)"
+    ],
+    "e2e_smoke": [
+      "Train → log to MLflow → encode splits → produce reports → assert SLO thresholds",
+      "Hard dictionary generation from a minimal grammar"
+    ],
+    "quality_gates": [
+      "pre-commit (ruff/black/mypy)",
+      "pre-merge (pytest -q; coverage >= 75%)",
+      "pre-release (e2e smoke on sample dataset)"
+    ]
+  },
+  "non_functional": {
+    "performance": "Memory bounded to <= 4GB during training on 8k vocab; stream input to avoid full load.",
+    "stability": "Graceful cancellation; temp files cleaned; retries on transient IO.",
+    "data_safety": "Optional PII scrub pass; logs redact long lines."
+  },
+  "observability": {
+    "metrics_jsonl": "append-only metrics.jsonl per run",
+    "console_table": "brief summary after each command",
+    "mlflow": "as above; with run_name, tags, params, metrics"
+  },
+  "security": {
+    "sandbox": "No remote code; file path allowlist for inputs",
+    "supply_chain": "Hash artifacts; pin library versions; record wheels in manifest"
+  },
+  "adr": [
+    {
+      "id": "ADR-B1-1",
+      "decision": "Support both SentencePiece (unigram) and HuggingFace Tokenizers (BPE) behind one CLI",
+      "status": "accepted",
+      "rationale": "Breadth and flexibility; common artifacts; reproducible training"
+    },
+    {
+      "id": "ADR-B1-2",
+      "decision": "Primary output format is tokenizer.json; convert to .model when using SP",
+      "status": "accepted"
+    }
+  ],
+  "risks": [
+    {
+      "risk": "Non-determinism from multithreading",
+      "mitigation": "TOKENIZERS_PARALLELISM=false, set seeds, single-threaded training option"
+    },
+    {
+      "risk": "High OOV/UNK for domain DSL",
+      "mitigation": "Provide hard dictionary via grammar; add user-defined tokens"
+    }
+  ],
+  "acceptance": {
+    "DoD": [
+      "MLflow contains tokenizer artifacts and segmentation report with oov_rate and avg token length",
+      "Encoded splits available (.npz/.arrow) and discoverable by tiny-transformer-lab",
+      "CLI commands exit with code 0 and produce documented files",
+      "Reproducible run with the same seed produces identical tokenizer artifacts (hash match)"
+    ]
+  },
+  "examples": {
+    "train": "tlg train-tokenizer kind=bpe vocab_size=8000 input=out/train.jsonl",
+    "encode": "tlg encode tokenizer=artifacts/tokenizers/tokenizer.json input=data/splits/*.jsonl out=encoded/train.arrow format=arrow",
+    "hard_dict": "tlg gen-dict grammar=spec/dsl-grammar.yml out=artifacts/dictionaries/dsl.vocab.txt"
+  }
+}
