@@ -2,21 +2,26 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Iterable
 
 import typer
 
 from tlg.catalog import add_dataset_to_catalog
 from tlg.config import ALLOWED_FORMATS, load_config
-from tlg.dictionaries import build_dictionary, load_dictionary_config
+from tlg.dictionaries import (
+    build_dictionary,
+    generate_dictionary_from_grammar,
+    load_dictionary_config,
+)
 from tlg.embeddings import build_embeddings, load_embeddings_config
 from tlg.generator import generate_dataset
 from tlg.grammar import load_grammar
-from tlg.mlflow_logger import log_run
+from tlg.mlflow_logger import log_encoding_run, log_run, log_tokenizer_run
 from tlg.stats import compute_stats, dataset_stats_from_dir
 from tlg.tokenizers_learned import (
     apply_tokenizer_to_dataset,
@@ -25,10 +30,17 @@ from tlg.tokenizers_learned import (
     save_trained_tokenizer,
     train_bpe,
 )
+from tlg.tokenizer_encoding import EncodeConfig, EncodeError, LoadedTokenizer, encode_dataset
+from tlg.tokenizer_io import compute_dataset_hash, iter_corpus_text, resolve_input_paths
+from tlg.tokenizer_training import (
+    TokenizerTrainingConfig,
+    TokenizerTrainingError,
+    train_tokenizer,
+)
 from tlg.validate import validate_dataset
 from tlg.writer import write_dataset
 
-app = typer.Typer(help="Toy Lang Lab CLI (Stage A2)")
+app = typer.Typer(help="Toy Lang Lab CLI (Stages A2/B1)")
 tok_app = typer.Typer(help="Tokenizer commands")
 app.add_typer(tok_app, name="tok")
 dict_app = typer.Typer(help="Dictionary commands")
@@ -37,6 +49,9 @@ embed_app = typer.Typer(help="Embeddings commands")
 app.add_typer(embed_app, name="embed")
 catalog_app = typer.Typer(help="Catalog commands")
 app.add_typer(catalog_app, name="catalog")
+
+
+DEFAULT_SPECIAL_TOKENS = ["<pad>", "<bos>", "<eos>", "<unk>", "<mask>"]
 
 
 def _timestamp_dir(base: Path = Path("out")) -> Path:
@@ -90,6 +105,22 @@ def _update_nested(data: dict[str, object], path: list[str], value: object) -> N
 
 def _canonicalize_raw(raw: dict[str, object]) -> dict[str, object]:
     return json.loads(json.dumps(raw))
+
+
+def _dataset_id_from_paths(paths: Iterable[Path]) -> str:
+    digest = hashlib.sha256()
+    for path in sorted(paths):
+        digest.update(path.name.encode("utf-8"))
+    return digest.hexdigest()[:8]
+
+
+def _print_summary(title: str, rows: dict[str, object]) -> None:
+    typer.echo(f"\n{title}")
+    if not rows:
+        return
+    width = max(len(key) for key in rows)
+    for key, value in rows.items():
+        typer.echo(f"  {key.ljust(width)} : {value}")
 
 @app.command("build-data")
 def build_data(
@@ -175,6 +206,199 @@ def build_data(
         params["tokenizer_hash"] = extra_manifest.get("tokenizer_hash", "")
     tags = {"stage": "A2", "component": "tlg-data-gen"}
     log_run(params=params, tags=tags, manifest=result.manifest, stats=stats, enabled=mlflow)
+
+
+@app.command("train-tokenizer")
+def train_tokenizer_command(
+    kind: Annotated[str, typer.Option("--kind", help="Tokenizer algorithm")],
+    vocab_size: Annotated[int, typer.Option("--vocab-size", help="Target vocabulary size")],
+    inputs: Annotated[list[str], typer.Option("--input", "-i", help="Input corpus files or globs")],
+    text_key: Annotated[str, typer.Option("--text-key", help="Field containing text")]="text",
+    normalization: Annotated[str, typer.Option("--normalization", help="Unicode normalization mode")]="nfc",
+    pretokenizer: Annotated[str, typer.Option("--pretokenizer", help="Pre-tokenization strategy")]="whitespace",
+    min_frequency: Annotated[int, typer.Option("--min-frequency", help="Minimum token frequency")]=2,
+    character_coverage: Annotated[float, typer.Option("--character-coverage", help="Character coverage for unigram")]=0.9995,
+    limit_alphabet: Annotated[int, typer.Option("--limit-alphabet", help="Alphabet limit for BPE")]=1000,
+    special_tokens: Annotated[list[str], typer.Option("--special-token", help="Special token to reserve")]=DEFAULT_SPECIAL_TOKENS,
+    seed: Annotated[int, typer.Option("--seed", help="Random seed")]=42,
+    out_dir: Annotated[Path, typer.Option("--out-dir", help="Base output directory")]=Path("artifacts/tokenizers"),
+    mlflow: Annotated[bool, typer.Option("--mlflow/--no-mlflow", help="Toggle MLflow logging")]=True,
+    run_name: Annotated[str, typer.Option("--run-name", help="MLflow run name")]="tokenizer-B1",
+) -> None:
+    kind_normalized = kind.lower()
+    if kind_normalized not in {"bpe", "unigram"}:
+        raise typer.BadParameter("kind must be 'bpe' or 'unigram'")
+
+    try:
+        corpus_paths = resolve_input_paths(inputs)
+    except Exception as exc:  # pragma: no cover - defensive
+        raise typer.BadParameter(str(exc)) from exc
+
+    dataset_hash = compute_dataset_hash(corpus_paths)
+    dataset_id = _dataset_id_from_paths(corpus_paths)
+    timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    output_dir = (out_dir / f"tokenizer-{kind_normalized}-v{vocab_size}-{dataset_id}-{timestamp}").resolve()
+
+    corpus = list(iter_corpus_text(corpus_paths, text_key))
+
+    training_config = TokenizerTrainingConfig(
+        kind=kind_normalized,
+        vocab_size=vocab_size,
+        min_frequency=min_frequency,
+        character_coverage=character_coverage,
+        limit_alphabet=limit_alphabet,
+        normalization=normalization.lower(),
+        pretokenizer=pretokenizer.lower(),
+        special_tokens=list(special_tokens),
+        seed=seed,
+        output_dir=output_dir,
+    )
+
+    try:
+        result = train_tokenizer(
+            training_config,
+            corpus,
+            dataset_hash=dataset_hash,
+            dataset_id=dataset_id,
+        )
+    except TokenizerTrainingError as exc:
+        typer.echo(f"Tokenizer training failed: {exc}", err=True)
+        raise typer.Exit(code=3) from exc
+
+    metric_rows = {key: f"{value:.6f}" for key, value in result.report.items()}
+    artifact_rows = {key: value for key, value in result.artifacts.items() if key != "tokenizer_hash"}
+    artifact_rows["tokenizer_hash"] = result.tokenizer_hash
+
+    _print_summary("Tokenizer Metrics", metric_rows)
+    _print_summary("Tokenizer Artifacts", artifact_rows)
+
+    params = {
+        "kind": kind_normalized,
+        "vocab_size": vocab_size,
+        "min_frequency": min_frequency,
+        "character_coverage": character_coverage,
+        "limit_alphabet": limit_alphabet,
+        "normalization": normalization,
+        "pretokenizer": pretokenizer,
+        "seed": seed,
+        "dataset_hash": dataset_hash,
+        "dataset_id": dataset_id,
+        "input_files": len(corpus_paths),
+    }
+    tags = {"layer": "B1", "command": "train-tokenizer"}
+    if log_tokenizer_run(
+        params,
+        result.report,
+        tags,
+        artifact_dir=training_config.output_dir,
+        manifest=result.manifest,
+        run_name=run_name,
+        enabled=mlflow,
+    ):
+        typer.echo("Logged tokenizer run to MLflow")
+
+    typer.echo(json.dumps(result.manifest, indent=2))
+
+
+@app.command("encode")
+def encode_command(
+    tokenizer_path: Annotated[Path, typer.Option("--tokenizer", help="tokenizer.json or tokenizer.model")],
+    inputs: Annotated[list[str], typer.Option("--input", "-i", help="Files to encode")],
+    text_key: Annotated[str, typer.Option("--text-key", help="Field containing text")]="text",
+    format: Annotated[str, typer.Option("--format", help="Output format (arrow|npz)")]="arrow",
+    out: Annotated[Path, typer.Option("--out", help="Output path")]=Path("encoded/output.arrow"),
+    max_length: Annotated[int, typer.Option("--max-length", help="Maximum sequence length")]=256,
+    pad_to_max_length: Annotated[bool, typer.Option("--pad-to-max-length/--no-pad-to-max-length", help="Pad sequences")]=True,
+    prepend_bos: Annotated[bool, typer.Option("--prepend-bos/--no-prepend-bos", help="Prepend BOS token")]=True,
+    append_eos: Annotated[bool, typer.Option("--append-eos/--no-append-eos", help="Append EOS token")]=True,
+    write_maps: Annotated[bool, typer.Option("--write-maps/--no-write-maps", help="Export token maps")]=True,
+    mlflow: Annotated[bool, typer.Option("--mlflow/--no-mlflow", help="Toggle MLflow logging")]=True,
+    run_name: Annotated[str, typer.Option("--run-name", help="MLflow run name")]="encode-B1",
+) -> None:
+    format_normalized = format.lower()
+    if format_normalized not in {"arrow", "npz"}:
+        raise typer.BadParameter("format must be 'arrow' or 'npz'")
+
+    try:
+        tokenizer = LoadedTokenizer(tokenizer_path)
+    except EncodingError as exc:
+        typer.echo(f"Failed to load tokenizer: {exc}", err=True)
+        raise typer.Exit(code=4) from exc
+
+    try:
+        corpus_paths = resolve_input_paths(inputs)
+    except Exception as exc:  # pragma: no cover
+        raise typer.BadParameter(str(exc)) from exc
+
+    dataset_hash = compute_dataset_hash(corpus_paths)
+    dataset_id = _dataset_id_from_paths(corpus_paths)
+
+    output_path = out.resolve()
+    if format_normalized == "arrow" and output_path.suffix != ".arrow":
+        output_path = output_path.with_suffix(".arrow")
+    if format_normalized == "npz" and output_path.suffix != ".npz":
+        output_path = output_path.with_suffix(".npz")
+
+    encode_config = EncodeConfig(
+        tokenizer_path=tokenizer_path.resolve(),
+        input_paths=corpus_paths,
+        text_key=text_key,
+        output_path=output_path,
+        output_format=format_normalized,
+        max_length=max_length,
+        pad_to_max_length=pad_to_max_length,
+        prepend_bos=prepend_bos,
+        append_eos=append_eos,
+        write_maps=write_maps,
+    )
+
+    try:
+        result = encode_dataset(encode_config, tokenizer, iter_corpus_text(corpus_paths, text_key))
+    except EncodingError as exc:
+        typer.echo(f"Encoding failed: {exc}", err=True)
+        raise typer.Exit(code=5) from exc
+
+    metrics_display = {key: f"{value:.6f}" for key, value in result.metrics.items()}
+    _print_summary("Encoding Metrics", metrics_display)
+    _print_summary("Encoding Artifacts", result.artifacts)
+
+    params = {
+        "tokenizer": str(tokenizer_path),
+        "format": format_normalized,
+        "max_length": max_length,
+        "pad_to_max_length": pad_to_max_length,
+        "prepend_bos": prepend_bos,
+        "append_eos": append_eos,
+        "write_maps": write_maps,
+        "dataset_hash": dataset_hash,
+        "dataset_id": dataset_id,
+        "samples": result.metrics.get("samples", 0.0),
+    }
+    tags = {"layer": "B1", "command": "encode"}
+    if log_encoding_run(
+        params,
+        result.metrics,
+        tags,
+        artifact_paths=result.artifacts,
+        manifest=result.manifest,
+        run_name=run_name,
+        enabled=mlflow,
+    ):
+        typer.echo("Logged encoding run to MLflow")
+
+    typer.echo(json.dumps(result.manifest, indent=2))
+
+
+@app.command("gen-dict")
+def gen_dict_command(
+    grammar_path: Annotated[Path, typer.Option("--grammar", help="Grammar YAML path")],
+    out: Annotated[Path, typer.Option("--out", help="Output vocabulary path")],
+    add_specials: Annotated[list[str], typer.Option("--add-special", help="Special tokens to prefix")]=["<pad>", "<bos>", "<eos>", "<unk>"],
+) -> None:
+    grammar = load_grammar(grammar_path)
+    manifest = generate_dictionary_from_grammar(grammar, out.resolve(), add_specials=list(add_specials))
+    _print_summary("Dictionary Artifacts", manifest)
+    typer.echo(json.dumps(manifest, indent=2))
 
 
 PathArg = Annotated[str, typer.Argument(..., help="Output directory or path=...")]
